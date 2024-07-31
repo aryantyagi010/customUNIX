@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
 #include <signal.h>
+#include <fcntl.h>
 
 #define MAX_LINE 80 
 #define MAX_ARGS 10 
@@ -115,11 +116,38 @@ void sigchld_handler(int sig) {
 }
 
 void executeCommand(char *args[], int background, char *input) {
+    int pipe_fds[2];
+    int has_pipe = 0;
+    char *pipe_cmd[MAX_ARGS + 1];
+
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], "|") == 0) {
+            has_pipe = 1;
+            args[i] = NULL;
+            for (int j = i + 1; args[j] != NULL; j++) {
+                pipe_cmd[j - i - 1] = args[j];
+            }
+            pipe_cmd[i] = NULL;
+            break;
+        }
+    }
+
+    if (has_pipe && pipe(pipe_fds) == -1) {
+        perror("Pipe failed");
+        return;
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         perror("Fork failed");
         exit(1);
     } else if (pid == 0) { // Child process
+        if (has_pipe) {
+            close(pipe_fds[0]);
+            dup2(pipe_fds[1], STDOUT_FILENO);
+            close(pipe_fds[1]);
+        }
+
         if (execvp(args[0], args) == -1) {
             perror("Execution failed");
         }
@@ -130,9 +158,31 @@ void executeCommand(char *args[], int background, char *input) {
             add_job(pid, input);
         } else {
             int status;
-            waitpid(pid, &status, WUNTRACED);
-            if (WIFSTOPPED(status)) {
-                add_job(pid, input);
+            if (has_pipe) {
+                pid_t pipe_pid = fork();
+                if (pipe_pid < 0) {
+                    perror("Fork failed");
+                    exit(1);
+                } else if (pipe_pid == 0) { // Child process for second command in pipe
+                    close(pipe_fds[1]);
+                    dup2(pipe_fds[0], STDIN_FILENO);
+                    close(pipe_fds[0]);
+
+                    if (execvp(pipe_cmd[0], pipe_cmd) == -1) {
+                        perror("Execution failed");
+                    }
+                    exit(0);
+                } else { // Parent process
+                    close(pipe_fds[0]);
+                    close(pipe_fds[1]);
+                    waitpid(pid, &status, 0);
+                    waitpid(pipe_pid, &status, 0);
+                }
+            } else {
+                waitpid(pid, &status, WUNTRACED);
+                if (WIFSTOPPED(status)) {
+                    add_job(pid, input);
+                }
             }
         }
     }
@@ -208,22 +258,18 @@ int main(void) {
         printf("osh> ");
         fflush(stdout);
 
-
         if (fgets(input, MAX_LINE, stdin) == NULL) {
             perror("fgets failed");
             continue;
         }
 
-        
         size_t length = strlen(input);
         if (length > 0 && input[length - 1] == '\n') {
             input[length - 1] = '\0';
         }
 
-        
         add_history(input);
 
-        
         int argc = 0;
         char *token = strtok(input, " ");
         int background = 0;
@@ -239,13 +285,11 @@ int main(void) {
             continue; 
         }
 
-        
         if (argc > 0 && strcmp(args[argc - 1], "&") == 0) {
             background = 1;
             args[argc - 1] = NULL;
         }
 
-        
         if (strcmp(args[0], "exit") == 0) {
             should_run = 0;
             continue;
@@ -313,7 +357,6 @@ int main(void) {
             continue;
         }
 
-        
         executeCommand(args, background, input);
     }
 
